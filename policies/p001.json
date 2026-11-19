@@ -1,0 +1,24 @@
+{
+  "id": "p001",
+  "parent": null,
+  "created_by": "bootstrap",
+  "thresholds": {
+    "gap": 0.6,
+    "spread": 0.5
+  },
+  "search": {
+    "lr_scale": 0.3,
+    "epochs": 5,
+    "patience": 2,
+    "weight_decay": 0.0
+  },
+  "router": {
+    "rule": 0.2,
+    "qwen": 0.8,
+    "skill": 0.0
+  },
+  "skills": [],
+  "code": null,
+  "replay": {},
+  "status": "champion"
+}

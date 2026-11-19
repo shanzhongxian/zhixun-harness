@@ -1,0 +1,27 @@
+{
+  "batch_dir": "inbox",
+  "submit_dir": "submit",
+  "batch_glob": "batch-*.jsonl",
+  "max_batch_mb": 128,
+  "entrypoint_timeout_s": 720,
+  "artifact_file": "artifact.json",
+  "no_op_file": "no_op.json",
+  "allow_train": false,
+  "pytrio": {
+    "model": "Qwen/Qwen3.8-27B",
+    "alternative_model": "Qwen/Qwen3.8-27B",
+    "base_url_env": "PYTRIO_BASE_URL",
+    "api_key_env": "PYTRIO_API_KEY"
+  },
+  "swanlab": {
+    "project": "zhixun-engine",
+    "workspace": "shanzhongxian",
+    "api_host": "https://api.swanlab.cn",
+    "web_host": "https://swanlab.cn",
+    "logdir_env": "SWANLAB_LOGDIR",
+    "mode_env": "SWANLAB_MODE",
+    "public": true
+  },
+  "data_root_env": "HARNESS_DATA_ROOT",
+  "runs_dir_env": "HARNESS_RUNS_DIR"
+}

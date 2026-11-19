@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decision",
+  "description": "训练师（Qwen）输出的决策对象；与 src/strategy/schemas.py 保持一致，不得越界。",
+  "type": "object",
+  "required": ["action", "hypothesis", "evidence_ids", "params"],
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": ["train", "no_op", "rollback"],
+      "description": "train=续训；no_op=不动；rollback=回退上一版本"
+    },
+    "hypothesis": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "一句话说明原因，非空，供审计"
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "maxItems": 10,
+      "description": "引用的观测字段，如 drift_flag / group_metrics / gap"
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lr_scale": {"type": "number", "minimum": 0.01, "maximum": 1.0},
+        "epochs": {"type": "integer", "minimum": 1, "maximum": 200},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "patience": {"type": "integer", "minimum": 1, "maximum": 100},
+        "weight_decay": {"type": "number", "minimum": 0.0, "maximum": 0.001}
+      }
+    }
+  }
+}

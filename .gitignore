@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.npz
+*.pt
+*.pth
+*.bin
+*.pkl
+*.tar
+*.tar.gz
+*.zip
+
+# 数据与大目录
+runs/
+swanlog/
+_archive/
+.self-train/
+.first-train/
+.selftest/
+inbox_gas/
+data/
+submit/context/
+.pytrio/
+.env
+
+# 系统
+Thumbs.db
+desktop.ini

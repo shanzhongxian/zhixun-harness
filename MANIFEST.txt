@@ -1,0 +1,42 @@
+智训引擎 交接包 MANIFEST（初始化后）
+====================================
+日期：2026-11-11（初始化 2026-11-12）
+方向：A → B
+范围：代码 + 文档 + 任务清单；不含原始数据，不含任何密钥
+
+初始化做了什么
+--------------
+1. 三套 runs 合并：以 .self-train/runs 为准提升到 runs/，
+   旧的不一致副本归档到 _archive/runs_broken/
+2. 所有 E:\ 绝对路径改写为仓库根相对路径
+3. 清理 __pycache__（7 个）
+4. 建立 submit/ 目录
+5. .gitignore 增加 .first-train/、_archive/
+6. docs 中示例路径改为占位符
+
+当前有效状态（runs/current.json）
+--------------------------------
+A：.self-train/rounds/round-2/A（macro_f1 0.7264）
+B：.self-train/rounds/round-2/B（rmse 655.99）
+C：.self-train/rounds/round-1/C（rmse 51.85）
+
+目录
+----
+src/           代码
+packages/      三个训练包
+inbox_gas/     10 个气体批次
+runs/          有效决策日志 + 版本指针
+submit/        产物目录（空）
+docs/          文档（先读 docs/交接文档.md）
+configs/       platform.json、machine.env.example
+_archive/      旧 runs 备份（可删）
+
+不含
+----
+原始数据（XJTU / CMAPSS / gas .dat）——用 HARNESS_DATA_ROOT 指向本机数据
+任何 API Key —— 由 A 私聊提供
+
+校验
+----
+python src/scripts/smoke.py        应四项 PASS（不触发训练）
+python src/train_pytrio.py --probe 应返回 ok: true
