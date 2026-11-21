@@ -30,6 +30,12 @@ def _log(message: str) -> None:
     print(str(message), file=sys.stderr, flush=True)
 
 
+def _sha256(path) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _config_path(key: str) -> Path:
     candidate = BASE / "baselines" / "configs" / ("%s.json" % key)
     if not candidate.is_file():
@@ -155,6 +161,9 @@ def train(rnd) -> None:
         gate = {"metric": context["metric"], "direction": context["metric_direction"],
                 "before": None, "after": None, "improved": False, "decision": "no_op"}
     else:
+        # 强制续训：父检查点缺失就立刻失败，绝不从头建模型。
+        if not parent.is_file():
+            raise RuntimeError("父检查点不存在，拒绝从头训练：%s" % parent)
         report = train_run(
             config, train_path, validation_path, trained,
             resume=parent,
@@ -172,14 +181,40 @@ def train(rnd) -> None:
     candidate = work / "candidate"
     candidate.mkdir(parents=True)
     shutil.copyfile(trained / "checkpoint.npz" if keep_trained else parent, candidate / "checkpoint.npz")
-    if report is not None:
-        for name in ("training.json", "history.jsonl"):
-            shutil.copyfile(trained / name, candidate / name)
+    if keep_trained:
+        shutil.copyfile(trained / "history.jsonl", candidate / "history.jsonl")
     gate["selected"] = "trained" if keep_trained else "parent"
+
+    # 自写训练报告：只写可核验的事实，且必须与候选目录里实际的 checkpoint 一致。
+    candidate_sha = _sha256(candidate / "checkpoint.npz")
+    training_report = {
+        "format": "contest.training-report.v1",
+        "dataset": key,
+        "round_index": rnd.round_index,
+        "resumed": True,
+        "parent_artifact_id": rnd.parent.artifact_id,
+        "parent_checkpoint_sha256": _sha256(parent),
+        "candidate_checkpoint_sha256": candidate_sha,
+        "kept_parent": not keep_trained,
+        "selected": gate["selected"],
+        "epochs_requested": plan["epochs"],
+        "epochs_ran": int((report or {}).get("final_epochs", 0)) - int((report or {}).get("initial_epochs", 0)),
+        "initial_steps": int((report or {}).get("initial_steps", 0)),
+        "final_steps": int((report or {}).get("final_steps", 0)) if keep_trained else int((report or {}).get("initial_steps", 0)),
+        "primary_metric": context["metric"],
+        "metric_direction": context["metric_direction"],
+        "validation_before": (report or {}).get("validation_before"),
+        "validation_after": (report or {}).get("validation_after"),
+        "improved": bool(gate.get("improved")),
+    }
+    (candidate / "training.json").write_text(
+        json.dumps(training_report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
     (candidate / "decision.json").write_text(json.dumps({
         "dataset": key, "round_index": rnd.round_index, "plan": plan, "gate": gate,
         "model_call_id": call_id,
+        "parent_artifact_id": rnd.parent.artifact_id,
+        "resumed": True,
         "validation_before": (report or {}).get("validation_before"),
         "validation_after": (report or {}).get("validation_after"),
     }, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")

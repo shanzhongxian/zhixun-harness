@@ -37,8 +37,14 @@ def metrics(model, data):
     return {"mae": float(np.mean(np.abs(error))), "rmse": float(np.sqrt(np.mean(error ** 2)))}
 
 
-def train_run(profile, train_path, validation_path, output, *, resume=None, epochs=None,
+def train_run(profile, train_path, validation_path, output, *, resume, epochs=None,
               learning_rate=None, batch_size=None, seed=None, stage_id="baseline", label_provenance=None):
+    """Continue an existing checkpoint. Training from scratch is not supported by design."""
+    if not resume:
+        raise ValueError("resume is required: continue the official baseline or the platform parent checkpoint")
+    resume = Path(resume)
+    if not resume.is_file():
+        raise ValueError("resume checkpoint does not exist: %s" % resume)
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise ValueError("output must be a new directory; previous rounds are never overwritten")
@@ -63,18 +69,16 @@ def train_run(profile, train_path, validation_path, output, *, resume=None, epoc
     validation = read_dataset(validation_path, config["task"], classes, train["paths"])
     if set(train["ids"]) & set(validation["ids"]):
         raise ValueError("training and validation sample IDs overlap")
-    parent = checkpoint_digest(resume) if resume else None
-    model = Model.load(resume) if resume else Model(config["task"], train["paths"], classes,
-        train["x"], train["y"], hidden=config["hidden"], seed=config["seed"] if seed is None else seed,
-        learning_rate=config["learning_rate"], batch_size=config["batch_size"])
+    parent = checkpoint_digest(resume)
+    model = Model.load(resume)
     if (model.meta["task"] != config["task"] or model.meta["paths"] != train["paths"] or model.meta["classes"] != classes
-            or (resume and model.meta.get("profile") != config["profile"])):
+            or model.meta.get("profile") != config["profile"]):
         raise ValueError("checkpoint task, profile, feature schema or classes do not match")
-    if resume and seed is not None and seed != model.meta["seed"]:
+    if seed is not None and seed != model.meta["seed"]:
         raise ValueError("resume must preserve the checkpoint's random seed")
-    if resume and config["hidden"] != model.meta["hidden"]:
+    if config["hidden"] != model.meta["hidden"]:
         raise ValueError("resume hidden width must match checkpoint; changing the profile does not migrate weights")
-    if resume and config["seed"] != model.meta["seed"]:
+    if config["seed"] != model.meta["seed"]:
         raise ValueError("resume profile must preserve the checkpoint's random seed")
     model.meta["profile"] = config["profile"]
     if learning_rate is not None:
@@ -134,14 +138,14 @@ def main():
     parser.add_argument("--train", required=True)
     parser.add_argument("--validation", required=True)
     parser.add_argument("--output", required=True)
-    continuation = parser.add_mutually_exclusive_group()
+    continuation = parser.add_mutually_exclusive_group(required=True)
     continuation.add_argument("--resume", help="Previous round checkpoint; preserve weights, Adam, normalization and epoch")
     continuation.add_argument("--from-baseline", help="Official/reference starting checkpoint; identical continuation semantics")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--stage-id", default="baseline")
+    parser.add_argument("--stage-id", default="round-1")
     parser.add_argument("--label-provenance", help="Required for B: JSON with status and method; declared approval is not verified here")
     args = parser.parse_args()
     if args.epochs is not None and not 1 <= args.epochs <= 10000:
