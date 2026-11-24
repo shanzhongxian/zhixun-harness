@@ -1,5 +1,6 @@
 """Train or continue a CPU baseline from public train/validation JSONL only."""
 import argparse
+import copy
 from datetime import datetime, timezone
 import json
 import os
@@ -38,8 +39,13 @@ def metrics(model, data):
 
 
 def train_run(profile, train_path, validation_path, output, *, resume, epochs=None,
-              learning_rate=None, batch_size=None, seed=None, stage_id="baseline", label_provenance=None):
-    """Continue an existing checkpoint. Training from scratch is not supported by design."""
+              learning_rate=None, batch_size=None, seed=None, stage_id="baseline",
+              label_provenance=None, primary_metric=None, deadline=None):
+    """Continue an existing checkpoint. Training from scratch is not supported by design.
+
+    primary_metric 决定本轮保存哪一个 epoch；deadline 是单调时钟上的软截止时间，
+    只用于防止超时，至少会训练 1 个 epoch。
+    """
     if not resume:
         raise ValueError("resume is required: continue the official baseline or the platform parent checkpoint")
     resume = Path(resume)
@@ -91,15 +97,38 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
         raise ValueError("epochs must be in 1..10000")
     initial_steps, initial_epochs = model.meta["steps"], model.meta["epochs"]
     validation_before = metrics(model, validation)
+    direction = -1.0 if config["task"] == "regression" else 1.0
+    metric_name = primary_metric if isinstance(primary_metric, str) and primary_metric else (
+        "macro_f1" if config["task"] == "classification" else "rmse")
     started = time.monotonic()
     records = []
+    best_model = None
+    best_validation = None
+    best_epoch = None
+    best_value = None
+    stop_reason = "epochs"
     for _ in range(count):
+        # 软截止只在"已经开始训练"之后生效，且至少完成 1 个 epoch，避免本轮无产物。
+        if deadline is not None and records and time.monotonic() >= deadline:
+            stop_reason = "deadline"
+            break
         loss = model.fit(train["x"], train["y"], 1)[0]
+        current = metrics(model, validation)
         records.append({"epoch": model.meta["epochs"], "step": model.meta["steps"], "loss": loss,
-                        "validation": metrics(model, validation)})
+                        "validation": current})
+        value = current.get(metric_name)
+        if not isinstance(value, float):
+            value = current.get("rmse") if isinstance(current.get("rmse"), float) else None
+        if value is not None and (best_model is None or direction * (value - best_value) > 0):
+            best_model, best_validation, best_epoch, best_value = copy.deepcopy(model), current, model.meta["epochs"], value
     duration = time.monotonic() - started
     if not records:
         raise ValueError("at least one training epoch is required")
+    # 保存本轮最好的那个 epoch（哪怕比父检查点差），这样候选一定是真实训练产物。
+    if best_model is None:
+        best_model, best_validation, best_epoch = model, records[-1]["validation"], model.meta["epochs"]
+    saved_steps, saved_epochs = best_model.meta["steps"], best_model.meta["epochs"]
+    model = best_model
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".baseline-", dir=output.parent) as temporary:
         staging = Path(temporary) / "result"
@@ -114,9 +143,13 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
                   "train_sha256": train["sha256"], "validation_sha256": validation["sha256"],
                   "profile_sha256": sha256(config_raw), "parent_checkpoint_sha256": parent,
                   "checkpoint_sha256": checkpoint_digest(checkpoint), "initial_steps": initial_steps,
-                  "initial_epochs": initial_epochs, "final_steps": model.meta["steps"], "final_epochs": model.meta["epochs"],
+                  "initial_epochs": initial_epochs, "final_steps": saved_steps, "final_epochs": saved_epochs,
                   "training_seconds": duration, "learning_rate": model.meta["learning_rate"], "batch_size": model.meta["batch_size"],
-                  "validation_before": validation_before, "validation_after": records[-1]["validation"],
+                  "validation_before": validation_before, "validation_after": best_validation,
+                  "primary_metric": metric_name, "selected_epoch": best_epoch,
+                  "epochs_completed": len(records), "requested_epochs": count, "epoch_stop_reason": stop_reason,
+                  "validation_by_epoch": [record["validation"] for record in records],
+                  "loss_by_epoch": [record["loss"] for record in records],
                   "configuration": {"hidden": model.meta["hidden"], "activation": "tanh", "optimizer": "Adam",
                       "adam_beta1": .9, "adam_beta2": .999, "adam_epsilon": 1e-8, "gradient_clip_norm": 5.0,
                       "feature_clip": [-10.0, 10.0], "normalization": "initial_training_mean_std",
