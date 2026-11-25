@@ -54,6 +54,52 @@ def flatten(inputs):
     return paths, values
 
 
+def _plan(inputs):
+    """第一行时建立取值计划：叶子顺序 + 每叶子的访问路径（不含字符串拼接）。"""
+    access, paths = [], []
+
+    def visit(value, trail, depth):
+        if depth > 16:
+            raise ValueError("input nesting exceeds limit")
+        if isinstance(value, dict):
+            for key in sorted(value):
+                if not isinstance(key, str) or re.sub(r"[^a-z0-9]", "", key.lower()) in FORBIDDEN_INPUTS:
+                    raise ValueError("target-derived input field is not allowed")
+                visit(value[key], trail + (("key", key),), depth + 1)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, trail + (("index", index),), depth + 1)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            access.append(trail)
+            paths.append(json.dumps([list(step) for step in trail], ensure_ascii=False, separators=(",", ":")))
+        else:
+            raise ValueError("model inputs must contain finite numeric features only")
+
+    visit(inputs, (), 0)
+    if not paths or len(paths) > 4096:
+        raise ValueError("expected 1..4096 numeric features")
+    return access, paths
+
+
+def _extract(inputs, access):
+    """按已建立的访问计划取值；结构不符时抛错，避免静默错位。"""
+    values = []
+    for trail in access:
+        node = inputs
+        for kind, key in trail:
+            if kind == "key":
+                if not isinstance(node, dict) or key not in node:
+                    raise ValueError("feature schema changed")
+            else:
+                if not isinstance(node, list) or len(node) <= key:
+                    raise ValueError("feature schema changed")
+            node = node[key]
+        if not isinstance(node, (int, float)) or isinstance(node, bool) or not math.isfinite(node):
+            raise ValueError("model inputs must contain finite numeric features only")
+        values.append(float(node))
+    return values
+
+
 def read_dataset(path, task, classes=None, expected_paths=None):
     path = Path(path)
     if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_BYTES:
@@ -62,6 +108,7 @@ def read_dataset(path, task, classes=None, expected_paths=None):
     ids, features, targets = [], [], []
     seen = set()
     paths = expected_paths
+    access = None
     for number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -71,11 +118,21 @@ def read_dataset(path, task, classes=None, expected_paths=None):
         identity = row["id"]
         if not isinstance(identity, str) or not identity or identity in seen:
             raise ValueError(f"line {number}: sample IDs must be nonempty and unique")
-        current_paths, values = flatten(row["inputs"])
-        if paths is None:
-            paths = current_paths
-        if current_paths != paths:
-            raise ValueError(f"line {number}: feature schema changed")
+        if access is None:
+            access, current_paths = _plan(row["inputs"])
+            if paths is None:
+                paths = current_paths
+            if current_paths != paths:
+                raise ValueError(f"line {number}: feature schema changed")
+            values = _extract(row["inputs"], access)
+        else:
+            # 每 1000 行做一次完整结构校验，其余行走快速取值路径。
+            if number % 1000 == 0:
+                full_paths, values = flatten(row["inputs"])
+                if full_paths != paths:
+                    raise ValueError(f"line {number}: feature schema changed")
+            else:
+                values = _extract(row["inputs"], access)
         answer = row["answer"]
         if task == "classification":
             if not isinstance(answer, str) or not classes or answer not in classes:

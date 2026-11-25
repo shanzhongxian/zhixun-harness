@@ -17,7 +17,7 @@ APP = ROOT / "app"
 SUBMIT = ROOT / "submit"
 CONTEXT = SUBMIT / "context"
 MODULES = ["harness.py", "contest_submission.py", "contest_paths.py", "contest_data.py", "contest_llm.py"]
-BASELINES = ["__init__.py", "data.py", "model.py", "predict.py", "train.py"]
+BASELINES = ["__init__.py", "data.py", "model.py", "predict.py", "train.py", "efficiency.py"]
 CONFIGS = ["A.json", "B.json", "C.json"]
 
 

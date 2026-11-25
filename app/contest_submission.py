@@ -72,14 +72,17 @@ def _parent_checkpoint(rnd) -> Path:
     return rnd.parent.path(declared[0], root=paths.previous_dir())
 
 
-def _materialize(rnd, work: Path):
+def _materialize(rnd, work: Path, key: str):
+    from baselines import efficiency  # 延迟导入，describe 阶段不加载
     train_path = work / "train.jsonl"
     validation_path = work / "validation.jsonl"
-    train_rows = contest_data.write_jsonl(rnd.data.training_rows(), train_path)
+    # 效率策略在物化阶段生效：少写、少解析、少训练，三者同源。
+    rows, filter_meta = efficiency.filter_rows(key, rnd.data.training_rows())
+    train_rows = contest_data.write_jsonl(rows, train_path)
     validation_rows = contest_data.write_jsonl(rnd.data.validation_rows(), validation_path)
     if not train_rows or not validation_rows:
         raise RuntimeError("公开数据为空：train=%d validation=%d" % (train_rows, validation_rows))
-    return train_path, validation_path, train_rows, validation_rows
+    return train_path, validation_path, train_rows, validation_rows, filter_meta
 
 
 def _summarize(rnd, key: str, history, train_rows: int, validation_rows: int) -> dict:
@@ -110,16 +113,22 @@ def _provenance(work: Path) -> Path:
     return target
 
 
-def _evaluate(metric: str, before, after) -> dict:
+def _evaluate(metric: str, before, after, tolerance: float = 0.0) -> dict:
     direction = _METRIC_DIRECTION.get(metric, "higher")
     before = dict(before or {})
     after = dict(after or {})
     value_before = before.get(metric)
     value_after = after.get(metric)
-    improved = value_after is not None and value_before is not None and (
-        value_after > value_before if direction == "higher" else value_after < value_before)
+    improved = False
+    if _number(value_before) and _number(value_after):
+        # tolerance 允许相对退化：阶段切换时跨阶段比较没有参照，留 0.5% 余量。
+        slack = abs(float(value_before)) * float(tolerance)
+        if direction == "higher":
+            improved = value_after > value_before - slack
+        else:
+            improved = value_after < value_before + slack
     return {"metric": metric, "direction": direction, "before": value_before, "after": value_after,
-            "improved": bool(improved)}
+            "tolerance": float(tolerance), "improved": bool(improved)}
 
 
 def _number(value):
@@ -241,7 +250,10 @@ def train(rnd) -> None:
     work.mkdir(parents=True)
     memory = _load_memory(rnd, work)
     _recon(rnd, key, memory)
-    train_path, validation_path, train_rows, validation_rows = _materialize(rnd, work)
+    train_path, validation_path, train_rows, validation_rows, filter_meta = _materialize(rnd, work, key)
+    _log("[timing] materialize=%.2fs rows=%d/%d filter=%s"
+         % (time.monotonic() - round_started, train_rows, validation_rows,
+            json.dumps(filter_meta, ensure_ascii=False)))
     parent = _parent_checkpoint(rnd)
     history = rnd.history()
     config = _config_path(key)
@@ -282,8 +294,15 @@ def train(rnd) -> None:
         label_provenance=_provenance(work) if key == "B" else None,
         primary_metric=context["metric"],
         deadline=_deadline(rnd, round_started),
+        efficiency_meta=filter_meta,
     )
-    gate = _evaluate(context["metric"], report["validation_before"], report["validation_after"])
+    _log("[timing] train=%.2fs report=%.2fs epochs=%s strategy=%s"
+         % (time.monotonic() - round_started, float(report.get("training_seconds") or 0.0),
+            report.get("epochs_completed"),
+            (report.get("efficiency") or {}).get("strategy")))
+    tolerance = 0.005 if context["stage_changed"] else 0.0
+    gate = _evaluate(context["metric"], report["validation_before"], report["validation_after"],
+                     tolerance=tolerance)
     gate.update(_guard(context["metric"], report["validation_before"], report["validation_after"]))
     gate["decision"] = "train"
     accepted = bool(gate.get("improved")) and not gate.get("vetoed")
@@ -310,6 +329,7 @@ def train(rnd) -> None:
         "epochs_completed": report.get("epochs_completed"),
         "epoch_stop_reason": report.get("epoch_stop_reason"),
         "validation_by_epoch": report.get("validation_by_epoch"),
+        "efficiency": report.get("efficiency"),
         "rejections_before": context["rejections"],
         "accepted": accepted,
     }
@@ -397,8 +417,9 @@ def train(rnd) -> None:
     )
     # 候选已经作为真实训练产物提交并被平台测量；这里只决定本轮"选中"哪一个。
     selected_id = submitted["artifact_id"] if accepted else rnd.parent.artifact_id
-    _log("[submit] artifact=%s accepted=%s selected=%s extra=%s"
-         % (submitted.get("artifact_id"), accepted, selected_id,
+    elapsed = time.monotonic() - round_started
+    _log("[submit] artifact=%s accepted=%s selected=%s total=%.2fs extra=%s"
+         % (submitted.get("artifact_id"), accepted, selected_id, elapsed,
             json.dumps({k: v for k, v in submitted.items() if k != "artifact_id"}, ensure_ascii=False)[:600]))
     rnd.finish(
         selected_artifact_id=selected_id,

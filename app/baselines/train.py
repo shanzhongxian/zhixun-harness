@@ -12,9 +12,11 @@ import time
 try:
     from .model import Model, checkpoint_digest, _THREADS
     from .data import read_dataset, sha256
+    from . import efficiency
 except ImportError:
     from model import Model, checkpoint_digest, _THREADS
     from data import read_dataset, sha256
+    import efficiency
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
@@ -40,7 +42,7 @@ def metrics(model, data):
 
 def train_run(profile, train_path, validation_path, output, *, resume, epochs=None,
               learning_rate=None, batch_size=None, seed=None, stage_id="baseline",
-              label_provenance=None, primary_metric=None, deadline=None):
+              label_provenance=None, primary_metric=None, deadline=None, efficiency_meta=None):
     """Continue an existing checkpoint. Training from scratch is not supported by design.
 
     primary_metric 决定本轮保存哪一个 epoch；deadline 是单调时钟上的软截止时间，
@@ -107,13 +109,24 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
     best_epoch = None
     best_value = None
     stop_reason = "epochs"
+    base_lr = model.meta["learning_rate"]
+    baseline_value = validation_before.get(metric_name)
+    if not isinstance(baseline_value, float):
+        baseline_value = validation_before.get("rmse")
+    abort_on = efficiency.abort_enabled(config["profile"]) and isinstance(baseline_value, float)
+    epoch_seconds = []
     for _ in range(count):
         # 软截止只在"已经开始训练"之后生效，且至少完成 1 个 epoch，避免本轮无产物。
         if deadline is not None and records and time.monotonic() >= deadline:
             stop_reason = "deadline"
             break
+        # 末端 cooldown：最后一个 epoch 降低学习率；checkpoint 里仍保存基准学习率。
+        if count >= 2 and len(records) == count - 1:
+            model.meta["learning_rate"] = base_lr * efficiency.COOLDOWN_FACTOR
+        epoch_started = time.monotonic()
         loss = model.fit(train["x"], train["y"], 1)[0]
         current = metrics(model, validation)
+        epoch_seconds.append(round(time.monotonic() - epoch_started, 6))
         records.append({"epoch": model.meta["epochs"], "step": model.meta["steps"], "loss": loss,
                         "validation": current})
         value = current.get(metric_name)
@@ -121,6 +134,13 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
             value = current.get("rmse") if isinstance(current.get("rmse"), float) else None
         if value is not None and (best_model is None or direction * (value - best_value) > 0):
             best_model, best_validation, best_epoch, best_value = copy.deepcopy(model), current, model.meta["epochs"], value
+        if abort_on and value is not None:
+            abort, info = efficiency.should_abort(direction, baseline_value, value, len(records))
+            if info:
+                (efficiency_meta if efficiency_meta is not None else {})["early_abort"] = info
+            if abort:
+                stop_reason = "early_abort"
+                break
     duration = time.monotonic() - started
     if not records:
         raise ValueError("at least one training epoch is required")
@@ -129,6 +149,7 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
         best_model, best_validation, best_epoch = model, records[-1]["validation"], model.meta["epochs"]
     saved_steps, saved_epochs = best_model.meta["steps"], best_model.meta["epochs"]
     model = best_model
+    model.meta["learning_rate"] = base_lr
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".baseline-", dir=output.parent) as temporary:
         staging = Path(temporary) / "result"
@@ -150,6 +171,9 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
                   "epochs_completed": len(records), "requested_epochs": count, "epoch_stop_reason": stop_reason,
                   "validation_by_epoch": [record["validation"] for record in records],
                   "loss_by_epoch": [record["loss"] for record in records],
+                  "efficiency": {**(efficiency_meta or {}), "epoch_seconds": epoch_seconds,
+                                 "train_rows_used": len(train["ids"]),
+                                 "cooldown_applied": bool(count >= 2 and len(records) >= 2)},
                   "configuration": {"hidden": model.meta["hidden"], "activation": "tanh", "optimizer": "Adam",
                       "adam_beta1": .9, "adam_beta2": .999, "adam_epsilon": 1e-8, "gradient_clip_norm": 5.0,
                       "feature_clip": [-10.0, 10.0], "normalization": "initial_training_mean_std",
