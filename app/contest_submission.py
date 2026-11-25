@@ -113,8 +113,17 @@ def _provenance(work: Path) -> Path:
     return target
 
 
-def _evaluate(metric: str, before, after, tolerance: float = 0.0) -> dict:
-    direction = _METRIC_DIRECTION.get(metric, "higher")
+def _evaluate(metric: str, before, after, tolerance: float = 0.0, direction: str = "") -> dict:
+    # 方向优先用平台任务合同里的 metric_direction（权威），映射表只作兜底；
+    # 两者都拿不到时才退回 "higher"，并在返回值里标出，便于事后核对。
+    resolved = str(direction or "").strip().lower()
+    source = "contract"
+    if resolved not in ("higher", "lower"):
+        resolved = _METRIC_DIRECTION.get(str(metric).strip().lower(), "")
+        source = "map"
+    if resolved not in ("higher", "lower"):
+        resolved = "higher"
+        source = "default"
     before = dict(before or {})
     after = dict(after or {})
     value_before = before.get(metric)
@@ -123,11 +132,12 @@ def _evaluate(metric: str, before, after, tolerance: float = 0.0) -> dict:
     if _number(value_before) and _number(value_after):
         # tolerance 允许相对退化：阶段切换时跨阶段比较没有参照，留 0.5% 余量。
         slack = abs(float(value_before)) * float(tolerance)
-        if direction == "higher":
+        if resolved == "higher":
             improved = value_after > value_before - slack
         else:
             improved = value_after < value_before + slack
-    return {"metric": metric, "direction": direction, "before": value_before, "after": value_after,
+    return {"metric": metric, "direction": resolved, "direction_source": source,
+            "before": value_before, "after": value_after,
             "tolerance": float(tolerance), "improved": bool(improved)}
 
 
@@ -302,7 +312,7 @@ def train(rnd) -> None:
             (report.get("efficiency") or {}).get("strategy")))
     tolerance = 0.005 if context["stage_changed"] else 0.0
     gate = _evaluate(context["metric"], report["validation_before"], report["validation_after"],
-                     tolerance=tolerance)
+                     tolerance=tolerance, direction=context.get("metric_direction", ""))
     gate.update(_guard(context["metric"], report["validation_before"], report["validation_after"]))
     gate["decision"] = "train"
     accepted = bool(gate.get("improved")) and not gate.get("vetoed")

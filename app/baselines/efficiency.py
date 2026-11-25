@@ -16,9 +16,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-PROFILE_FILTER = {"A": "none", "B": "hash_sample", "C": "tail_stratified"}
-# A 用轮次级方法：数据只有 445 行，实测无重复、最近邻最小距离 0.30，无可压缩空间，
-# 因此改为"第一个 epoch 后若明显劣于父检查点就放弃本轮剩余 epoch"。
+PROFILE_FILTER = {"A": "none", "B": "none", "C": "none"}
+# v5 起 B/C 的行抽样默认关闭。v4 的平台实测：C 的尾部保留抽样把 MAE 从 −2.07% 变成 +12.67%
+# （10 轮全部被拒、C 冻结在出厂模型），B 的 70% 抽样让隐藏集 RMSE 从 270.56 退化到 368.57。
+# 因此只保留"解析提速 + A 的轮次级早停"这两个无损改动；抽样实现留着，需要时改回 "hash_sample" /
+# "tail_stratified" 即可重新启用。
+# A 用轮次级方法：数据只有 445 行，实测无重复、最近邻最小距离 0.30，无可压缩空间。
 ABORT_PROFILES = {"A"}
 ABORT_MARGIN = 0.02
 
