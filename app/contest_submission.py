@@ -183,6 +183,23 @@ def _guard(metric: str, before, after) -> dict:
     return {"secondary": notes, "vetoed": vetoed}
 
 
+def _group_guard(metric: str, group, tolerance: float = 0.02) -> dict:
+    """最差物理单元否决：整体变好但最差单元变差的候选不予采用。"""
+    group = group or {}
+    worst_before = group.get("worst_before")
+    worst_after = group.get("worst_after")
+    count = group.get("n_groups") or 0
+    if not _number(worst_before) or not _number(worst_after) or count < 2:
+        return {"vetoed": False, "reason": "insufficient_groups", "n_groups": count}
+    slack = abs(float(worst_before)) * float(tolerance)
+    if metric in _HIGHER:
+        degraded = worst_after < worst_before - slack
+    else:
+        degraded = worst_after > worst_before + slack
+    return {"vetoed": bool(degraded), "worst_before": worst_before, "worst_after": worst_after,
+            "n_groups": count, "tolerance": float(tolerance)}
+
+
 def _rejections(rounds) -> int:
     """连续未采纳轮数：本轮决策据此强制换方向。"""
     count = 0
@@ -314,8 +331,10 @@ def train(rnd) -> None:
     gate = _evaluate(context["metric"], report["validation_before"], report["validation_after"],
                      tolerance=tolerance, direction=context.get("metric_direction", ""))
     gate.update(_guard(context["metric"], report["validation_before"], report["validation_after"]))
+    gate["group"] = _group_guard(context["metric"], report.get("group_metric"))
     gate["decision"] = "train"
-    accepted = bool(gate.get("improved")) and not gate.get("vetoed")
+    accepted = (bool(gate.get("improved")) and not gate.get("vetoed")
+                and not gate["group"].get("vetoed"))
 
     # 候选永远是真实训练产物；是否采用由 finish 的 selected_artifact_id 决定。
     candidate = work / "candidate"

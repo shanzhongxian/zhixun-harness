@@ -11,11 +11,11 @@ import time
 
 try:
     from .model import Model, checkpoint_digest, _THREADS
-    from .data import read_dataset, sha256
+    from .data import read_dataset, sha256, group_key
     from . import efficiency
 except ImportError:
     from model import Model, checkpoint_digest, _THREADS
-    from data import read_dataset, sha256
+    from data import read_dataset, sha256, group_key
     import efficiency
 import numpy as np
 
@@ -38,6 +38,42 @@ def metrics(model, data):
         return result
     error = predicted - expected
     return {"mae": float(np.mean(np.abs(error))), "rmse": float(np.sqrt(np.mean(error ** 2)))}
+
+
+def group_metrics(model, data, groups, metric):
+    """按物理单元分组算指标，用于"最差单元不退化"门禁。"""
+    values = {}
+    if groups is None or len(groups) != len(data["ids"]):
+        return values
+    unique = np.unique(groups)
+    if len(unique) <= 1:
+        return values
+    for name in unique:
+        mask = groups == name
+        if int(mask.sum()) < 3:
+            continue
+        subset = {"ids": [data["ids"][i] for i in np.flatnonzero(mask)],
+                  "x": data["x"][mask], "y": data["y"][mask]}
+        value = metrics(model, subset).get(metric)
+        if isinstance(value, float):
+            values[str(name)] = value
+    return values
+
+
+def worst_group(values, direction):
+    """返回最差单元的值：误差指标取最大，分类指标取最小。"""
+    if not values:
+        return None
+    ordered = list(values.values())
+    return max(ordered) if direction < 0 else min(ordered)
+
+
+def balanced_weights(targets, classes):
+    """逆频率类权重，均值归一化到 1，用于缓解 A 的 30 行最小类。"""
+    counts = np.bincount(np.asarray(targets, dtype=np.int64), minlength=len(classes)).astype(np.float64)
+    counts[counts == 0] = 1.0
+    weights = counts.sum() / (len(classes) * counts)
+    return weights / weights.mean()
 
 
 def train_run(profile, train_path, validation_path, output, *, resume, epochs=None,
@@ -89,6 +125,11 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
     if config["seed"] != model.meta["seed"]:
         raise ValueError("resume profile must preserve the checkpoint's random seed")
     model.meta["profile"] = config["profile"]
+    reg = efficiency.profile_regularization(config["profile"])
+    if reg.get("weight_decay"):
+        model.meta["weight_decay"] = float(reg["weight_decay"])
+    if reg.get("dropout") is not None:
+        model.meta["dropout"] = float(reg["dropout"])
     if learning_rate is not None:
         model.meta["learning_rate"] = learning_rate
     if batch_size is not None:
@@ -102,6 +143,14 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
     direction = -1.0 if config["task"] == "regression" else 1.0
     metric_name = primary_metric if isinstance(primary_metric, str) and primary_metric else (
         "macro_f1" if config["task"] == "classification" else "rmse")
+    validation_groups = np.asarray([group_key(identity, config["profile"]) for identity in validation["ids"]], dtype=object)
+    groups_before = group_metrics(model, validation, validation_groups, metric_name)
+    worst_before = worst_group(groups_before, direction)
+    if config["task"] == "classification" and efficiency.class_weight_mode(config["profile"]) == "balanced":
+        model.class_weight = balanced_weights(train["y"], config.get("classes") or [])
+    reg_meta = {"dropout": float(model.meta.get("dropout", 0.0) or 0.0),
+                "weight_decay": float(model.meta.get("weight_decay", 0.0) or 0.0),
+                "class_weight": efficiency.class_weight_mode(config["profile"])}
     started = time.monotonic()
     records = []
     best_model = None
@@ -150,6 +199,8 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
     saved_steps, saved_epochs = best_model.meta["steps"], best_model.meta["epochs"]
     model = best_model
     model.meta["learning_rate"] = base_lr
+    groups_after = group_metrics(model, validation, validation_groups, metric_name)
+    worst_after = worst_group(groups_after, direction)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".baseline-", dir=output.parent) as temporary:
         staging = Path(temporary) / "result"
@@ -173,7 +224,11 @@ def train_run(profile, train_path, validation_path, output, *, resume, epochs=No
                   "loss_by_epoch": [record["loss"] for record in records],
                   "efficiency": {**(efficiency_meta or {}), "epoch_seconds": epoch_seconds,
                                  "train_rows_used": len(train["ids"]),
-                                 "cooldown_applied": bool(count >= 2 and len(records) >= 2)},
+                                 "cooldown_applied": bool(count >= 2 and len(records) >= 2),
+                                 "regularization": reg_meta},
+                  "group_metric": {"metric": metric_name, "n_groups": len(groups_after),
+                                   "worst_before": worst_before, "worst_after": worst_after,
+                                   "per_group_before": groups_before, "per_group_after": groups_after},
                   "configuration": {"hidden": model.meta["hidden"], "activation": "tanh", "optimizer": "Adam",
                       "adam_beta1": .9, "adam_beta2": .999, "adam_epsilon": 1e-8, "gradient_clip_norm": 5.0,
                       "feature_clip": [-10.0, 10.0], "normalization": "initial_training_mean_std",

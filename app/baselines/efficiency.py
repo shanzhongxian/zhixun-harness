@@ -25,6 +25,28 @@ PROFILE_FILTER = {"A": "none", "B": "none", "C": "none"}
 ABORT_PROFILES = {"A"}
 ABORT_MARGIN = 0.02
 
+# 每任务的正则与类别权重。A 是 445 行 / 4326 参数、最小类只有 30 行，是唯一需要强正则的任务；
+# B 训练/验证差 2.83 倍，给一点权重衰减；C 本身欠拟合（train RMSE 高于 val），不加正则。
+#
+# 注意：v5 及以前 dropout 只是写进 meta 的死字段，forward/fit 里从未真正丢弃过。
+# v6 在 Model.fit 里实现了标准 inverted dropout（只在训练态生效，predict 不受影响）。
+PROFILE_REG = {
+    "A": {"dropout": 0.25, "weight_decay": 1e-3, "class_weight": "balanced"},
+    "B": {"dropout": 0.0, "weight_decay": 0.0, "class_weight": None},
+    "C": {"dropout": 0.0, "weight_decay": 0.0, "class_weight": None},
+}
+
+# 最差单元门禁：候选在"最差物理单元"上的相对退化超过该比例就否决。
+GROUP_GUARD_RATIO = 0.02
+
+
+def profile_regularization(profile) -> dict:
+    return dict(PROFILE_REG.get(str(profile).upper(), {}))
+
+
+def class_weight_mode(profile):
+    return PROFILE_REG.get(str(profile).upper(), {}).get("class_weight")
+
 # dedup
 DEDUP_FIELDS = ("inputs",)
 # hash_sample

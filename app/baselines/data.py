@@ -9,6 +9,23 @@ import numpy as np
 
 MAX_BYTES = 128 * 1024 * 1024
 FORBIDDEN_INPUTS = {"truerul", "normalizedrul", "remainingusefullife", "rul", "totalsnapshots"}
+_GROUP_PATTERNS = {
+    "A": r"gas_(b\d+)_",
+    "B": r"xjtu_(Bearing\d+_\d+)_",
+    # C 的数据是 FD001–FD004 四个子集的并集，单元号会重复，必须带子集前缀才唯一。
+    "C": r"(fd\d+_[a-z]+_u\d+)_",
+}
+
+
+def group_key(identity, profile=""):
+    """从样本 id 取物理单元号：A 批次 / B 轴承 / C 发动机单元；取不到则去掉尾部流水号。"""
+    pattern = _GROUP_PATTERNS.get(str(profile).upper())
+    if pattern:
+        match = re.search(pattern, str(identity))
+        if match:
+            return match.group(1)
+    stripped = re.sub(r"[_\-]?[a-z]?\d+$", "", str(identity))
+    return stripped or str(identity)
 
 
 def sha256(raw):

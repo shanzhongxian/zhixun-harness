@@ -111,6 +111,10 @@ class Model:
                 raise ValueError("unknown class")
             target = y
         epoch_losses = []
+        dropout = float(self.meta.get("dropout", 0.0) or 0.0)
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        weights = getattr(self, "class_weight", None)
         for _ in range(epochs):
             # Epoch-indexed shuffling makes split/resumed execution reproduce a continuous run.
             rng = np.random.default_rng(np.random.SeedSequence([self.meta["seed"], self.meta["epochs"]]))
@@ -119,21 +123,38 @@ class Model:
             for start in range(0, len(order), self.meta["batch_size"]):
                 indices = order[start:start + self.meta["batch_size"]]
                 batch, expected = x[indices], target[indices]
-                hidden, logits = self.forward(batch)
+                # 训练态前向：dropout 只乘在隐藏层输出上，反向传播用未丢弃的 z 求导。
+                z = np.tanh(batch @ self.params["w1"] + self.params["b1"])
+                if dropout > 0.0:
+                    keep = 1.0 - dropout
+                    mask = (rng.random(z.shape) < keep) / keep
+                    hidden = z * mask
+                else:
+                    mask, hidden = None, z
+                logits = hidden @ self.params["w2"] + self.params["b2"]
                 if self.meta["task"] == "classification":
                     logits -= logits.max(axis=1, keepdims=True)
                     probabilities = np.exp(logits)
                     probabilities /= probabilities.sum(axis=1, keepdims=True)
-                    loss_sum -= float(np.log(np.maximum(probabilities[np.arange(len(indices)), expected], 1e-300)).sum())
+                    picked = probabilities[np.arange(len(indices)), expected]
+                    if weights is not None:
+                        sample = weights[expected]
+                        loss_sum -= float((np.log(np.maximum(picked, 1e-300)) * sample).sum())
+                    else:
+                        loss_sum -= float(np.log(np.maximum(picked, 1e-300)).sum())
                     delta = probabilities
                     delta[np.arange(len(indices)), expected] -= 1
+                    if weights is not None:
+                        delta *= weights[expected][:, None]
                     delta /= len(indices)
                 else:
                     error = logits[:, 0] - expected
                     loss_sum += float(np.sum(error ** 2))
                     delta = (2 * error / len(indices))[:, None]
                 gradients = {"w2": hidden.T @ delta, "b2": delta.sum(axis=0)}
-                hidden_delta = (delta @ self.params["w2"].T) * (1 - hidden ** 2)
+                hidden_delta = (delta @ self.params["w2"].T) * (1 - z ** 2)
+                if mask is not None:
+                    hidden_delta *= mask
                 gradients.update(w1=batch.T @ hidden_delta, b1=hidden_delta.sum(axis=0))
                 norm = math.sqrt(sum(float(np.sum(g * g)) for g in gradients.values()))
                 if not math.isfinite(norm):
